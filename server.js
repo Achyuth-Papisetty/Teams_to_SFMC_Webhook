@@ -9,7 +9,6 @@ app.use(express.raw({ type: "*/*", limit: "4mb" }));
 
 const SECRET = process.env.TEAMS_SHARED_SECRET;
 
-// Convert Teams HTML into plain text
 function htmlToPlain(html) {
   return html
     .replace(/<at[^>]*>(.*?)<\/at>/gi, "@$1")
@@ -18,58 +17,73 @@ function htmlToPlain(html) {
     .trim();
 }
 
-function computeHmac(buffer) {
-  return crypto.createHmac("sha256", SECRET).update(buffer).digest();
+function computeHmac(buf) {
+  return crypto.createHmac("sha256", SECRET).update(buf).digest();
 }
 
-function safeEqual(a, b) {  
+function safeEqual(a, b) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 app.post("/teams", (req, res) => {
-  const header = req.headers["authorization"] || "";
+  const header = req.headers["authorization"];
 
-  if (!header.startsWith("HMAC ")) {
+  if (!header || !header.startsWith("HMAC ")) {
     return res.status(401).send("Missing HMAC");
   }
 
-  let payload;
+  let obj;
   try {
-    payload = JSON.parse(req.body.toString("utf8"));
+    obj = JSON.parse(req.body.toString("utf8"));
   } catch {
     return res.status(400).send("Invalid JSON");
   }
 
-  // Extract required components for Activity-based signing
-  const id = payload.id;
-  const timestamp = payload.timestamp;
-  const textHtml = payload.text || "";
-  const plainText = htmlToPlain(textHtml);
+  const plainText = htmlToPlain(obj.text || "");
 
-  // Construct the real signed Activity
-  const signedActivity = JSON.stringify({
-    type: "message",
-    id,
-    timestamp,
-    text: plainText
-  });
+  // THIS IS THE TRUE SIGNED ACTIVITY (using full Teams payload)
+  const activity = {
+    type: obj.type,
+    id: obj.id,
+    timestamp: obj.timestamp,
+    localTimestamp: obj.localTimestamp,
+    localTimezone: obj.localTimezone,
+    serviceUrl: obj.serviceUrl,
+    channelId: obj.channelId,
+    from: obj.from,
+    conversation: obj.conversation,
+    recipient: obj.recipient || null,
+    textFormat: obj.textFormat,
+    locale: obj.locale,
+    text: plainText,
+    attachments: obj.attachments || [],
+    entities: obj.entities || [],
+    channelData: obj.channelData || {}
+  };
 
-  const computed = computeHmac(Buffer.from(signedActivity, "utf8"));
+  const canonical = JSON.stringify(activity);
+  const canonicalBuf = Buffer.from(canonical, "utf8");
 
-  const incomingHmac = header.replace("HMAC ", "").trim();
-  const incomingBuf = Buffer.from(incomingHmac, "base64");
+  const incoming = header.replace("HMAC ", "").trim();
+  const incomingBuf = Buffer.from(incoming, "base64");
+
+  const computed = computeHmac(canonicalBuf);
 
   if (!safeEqual(computed, incomingBuf)) {
     console.log("❌ Invalid HMAC");
-    console.log("Signed Activity:", signedActivity);
+    console.log("Canonical:", canonical);
     return res.status(401).send("Invalid HMAC Signature");
   }
 
-  console.log("✔ Valid HMAC Activity verification");
+  console.log("✔ VALID HMAC (Full Activity Match)");
 
   return res.json({ text: "Verified ✔" });
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Running…");
+app.get("/", (req, res) => {
+  res.send("Teams webhook running ✔");
 });
+
+app.listen(process.env.PORT || 3000, () =>
+  console.log("Running...")
+);
