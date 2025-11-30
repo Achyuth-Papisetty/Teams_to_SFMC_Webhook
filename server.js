@@ -7,81 +7,69 @@ dotenv.config();
 const app = express();
 app.use(express.raw({ type: "*/*", limit: "4mb" }));
 
-const SHARED_SECRET = process.env.TEAMS_SHARED_SECRET;
+const SECRET = process.env.TEAMS_SHARED_SECRET;
 
-// Convert Teams HTML to plain text
+// Convert Teams HTML into plain text
 function htmlToPlain(html) {
-  if (!html) return "";
-
-  // Extract mention replacement text
-  html = html.replace(/<at[^>]*>(.*?)<\/at>/gi, (m, p1) => {
-    return "@" + p1;
-  });
-
-  // Replace HTML entities
-  html = html.replace(/&nbsp;/gi, " ");
-  html = html.replace(/&amp;/gi, "&");
-  html = html.replace(/&lt;/gi, "<");
-  html = html.replace(/&gt;/gi, ">");
-
-  // Remove all remaining tags
-  html = html.replace(/<[^>]+>/g, "");
-
-  return html.trim();
+  return html
+    .replace(/<at[^>]*>(.*?)<\/at>/gi, "@$1")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/<[^>]+>/g, "")
+    .trim();
 }
 
 function computeHmac(buffer) {
-  return crypto.createHmac("sha256", SHARED_SECRET).update(buffer).digest();
+  return crypto.createHmac("sha256", SECRET).update(buffer).digest();
 }
 
-function safeEqual(a, b) {
+function safeEqual(a, b) {  
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 app.post("/teams", (req, res) => {
   const header = req.headers["authorization"] || "";
+
   if (!header.startsWith("HMAC ")) {
     return res.status(401).send("Missing HMAC");
   }
 
-  const incoming = header.replace("HMAC ", "").trim();
-  const incomingBuf = Buffer.from(incoming, "base64");
-
-  let body;
+  let payload;
   try {
-    body = JSON.parse(req.body.toString("utf8"));
+    payload = JSON.parse(req.body.toString("utf8"));
   } catch {
-    return res.status(400).send("Bad JSON");
+    return res.status(400).send("Invalid JSON");
   }
 
-  const html = body.text || "";
-  const plain = htmlToPlain(html);
+  // Extract required components for Activity-based signing
+  const id = payload.id;
+  const timestamp = payload.timestamp;
+  const textHtml = payload.text || "";
+  const plainText = htmlToPlain(textHtml);
 
-  // Build canonical body that Teams signs
-  const canonicalJson = JSON.stringify({ text: plain });
-  const canonicalBuf = Buffer.from(canonicalJson, "utf8");
+  // Construct the real signed Activity
+  const signedActivity = JSON.stringify({
+    type: "message",
+    id,
+    timestamp,
+    text: plainText
+  });
 
-  const computed = computeHmac(canonicalBuf);
+  const computed = computeHmac(Buffer.from(signedActivity, "utf8"));
+
+  const incomingHmac = header.replace("HMAC ", "").trim();
+  const incomingBuf = Buffer.from(incomingHmac, "base64");
 
   if (!safeEqual(computed, incomingBuf)) {
     console.log("❌ Invalid HMAC");
-    console.log("HTML text:", html);
-    console.log("Plain text:", plain);
-    console.log("Canonical:", canonicalJson);
+    console.log("Signed Activity:", signedActivity);
     return res.status(401).send("Invalid HMAC Signature");
   }
 
-  console.log("✔ Valid HMAC (Teams HTML→PlainText method)");
-  console.log("Plain text:", plain);
+  console.log("✔ Valid HMAC Activity verification");
 
-  return res.json({
-    text: "Message received ✔ (verified)"
-  });
+  return res.json({ text: "Verified ✔" });
 });
 
-app.get("/", (req, res) => {
-  res.send("Teams → Node.js webhook running ✔ (final version)");
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Running…");
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Running on port", PORT));
