@@ -5,16 +5,17 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-// Accept raw body (SFMC will send JSON as text)
+
+// Accept RAW request body from SFMC AND Teams
 app.use(express.raw({ type: "*/*", limit: "8mb" }));
 
 const SECRET_BASE64 = process.env.TEAMS_SHARED_SECRET;
+
 if (!SECRET_BASE64) {
-  console.error("Missing TEAMS_SHARED_SECRET in environment!");
+  console.error("Missing TEAMS_SHARED_SECRET!");
   process.exit(1);
 }
 
-// Decode base64 Teams secret → raw key bytes
 const SECRET_KEY = Buffer.from(SECRET_BASE64, "base64");
 
 // Safe compare
@@ -24,78 +25,89 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(a, b);
 }
 
-// Compute HMAC
 function computeHmac(buf) {
   return crypto.createHmac("sha256", SECRET_KEY).update(buf).digest();
 }
 
-// Strip <at> tags, HTML tags
-function htmlToPlain(html) {
-  return html
+function htmlToPlain(html = "") {
+  return String(html)
     .replace(/<at[^>]*>(.*?)<\/at>/gi, "@$1")
     .replace(/&nbsp;/gi, " ")
     .replace(/<[^>]+>/g, "")
     .trim();
 }
 
-// Build canonical Activity object
-function canonicalActivity(obj) {
-  return Buffer.from(
-    JSON.stringify({
-      type: obj.type,
-      id: obj.id,
-      timestamp: obj.timestamp,
-      text: htmlToPlain(obj.text || "")
-    }),
-    "utf8"
-  );
-}
-
 app.post("/teams", (req, res) => {
   try {
-    // CloudPage sends:
-    // { body: "<raw Teams JSON>", hmac: "HMAC xyz==" }
-    const wrapper = JSON.parse(req.body.toString("utf8"));
+    const rawStr = req.body.toString("utf8");
 
-    const rawTeamsString = wrapper.body;
-    const authHeader = wrapper.hmac || "";
-    const rawBuffer = Buffer.from(rawTeamsString, "utf8");
+    // Try to parse raw payload
+    let wrapper = null;
+    try { wrapper = JSON.parse(rawStr); } catch (e) {}
 
-    console.log("RAW LENGTH:", rawBuffer.length);
-    console.log("AUTH FROM SFMC PAYLOAD:", authHeader.slice(0, 20) + "...");
+    let rawTeamsString = "";
+    let authHeader = "";
+
+    // ============================================
+    // CASE 1 — SFMC WRAPPER:
+    // { body:"<string>", hmac:"HMAC xxx==" }
+    // ============================================
+    if (wrapper && wrapper.body && wrapper.hmac) {
+      rawTeamsString = wrapper.body;
+      authHeader = wrapper.hmac;
+    }
+
+    // ============================================
+    // CASE 2 — CLOUDPAGE DIRECT SEND:
+    // rawTeamsString = rawStr; (Teams body)
+    // Auth header must be taken from incoming header
+    // ============================================
+    else {
+      rawTeamsString = rawStr;
+      authHeader = req.headers["authorization"] || "";
+    }
+
+    console.log("RAW LENGTH:", Buffer.byteLength(rawTeamsString));
+    console.log("AUTH:", authHeader.slice(0, 20) + "...");
 
     if (!authHeader || !authHeader.toUpperCase().startsWith("HMAC ")) {
-      console.log("Missing HMAC");
       return res.status(401).json({ error: "Missing HMAC" });
     }
 
     const incomingBase64 = authHeader.substring(5).trim();
     const incomingBuffer = Buffer.from(incomingBase64, "base64");
 
-    // Attempt 1 → raw-body verification
+    const rawBuffer = Buffer.from(rawTeamsString, "utf8");
+
+    // Attempt 1 — raw-body HMAC
     const computedRaw = computeHmac(rawBuffer);
     if (safeEqual(computedRaw, incomingBuffer)) {
-      console.log("✔ Verified using RAW method");
       const parsed = JSON.parse(rawTeamsString);
       return res.json({ text: htmlToPlain(parsed.text || "") });
     }
 
-    // Attempt 2 → canonical fallback
+    // Attempt 2 — fallback canonical mode
     const parsed = JSON.parse(rawTeamsString);
-    const canonicalBuf = canonicalActivity(parsed);
-    const computedCanonical = computeHmac(canonicalBuf);
+    const canonical = Buffer.from(
+      JSON.stringify({
+        type: parsed.type,
+        id: parsed.id,
+        timestamp: parsed.timestamp,
+        text: htmlToPlain(parsed.text || "")
+      }),
+      "utf8"
+    );
 
+    const computedCanonical = computeHmac(canonical);
     if (safeEqual(computedCanonical, incomingBuffer)) {
-      console.log("✔ Verified using CANONICAL fallback");
       return res.json({ text: htmlToPlain(parsed.text || "") });
     }
 
-    console.log("❌ Invalid HMAC (RAW + CANONICAL failed)");
     return res.status(401).json({ error: "Invalid HMAC" });
 
   } catch (err) {
     console.error("Server error:", err);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(200).json({ text: "OK" });
   }
 });
 
