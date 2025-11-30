@@ -13,13 +13,17 @@ app.use(bodyParser.text({ type: "*/*" }));
 
 const SHARED_SECRET = process.env.TEAMS_SHARED_SECRET;
 
+// Debug homepage
+app.get("/", (req, res) => {
+  res.send("Teams → Node.js webhook is running ✔");
+});
+
 // Verify Microsoft Teams HMAC SHA256
 function verifySignature(rawBody, header) {
   if (!header || !header.startsWith("HMAC ")) return false;
 
   const received = header.replace("HMAC ", "").trim();
 
-  // Compute our own HMAC
   const computed = crypto
     .createHmac("sha256", SHARED_SECRET)
     .update(Buffer.from(rawBody, "utf8"))
@@ -34,6 +38,8 @@ app.post("/teams", (req, res) => {
   const header = req.headers["authorization"] || "";
 
   console.log("Incoming Body:", rawBody);
+  console.log("RAW LENGTH:", rawBody.length);
+  console.log("RAW BYTES:", Buffer.from(rawBody, "utf8"));
   console.log("Authorization:", header);
 
   // Validate HMAC
@@ -44,8 +50,8 @@ app.post("/teams", (req, res) => {
 
   console.log("✔ Valid HMAC Signature");
 
-  // Parse JSON safely
   let payload;
+
   try {
     payload = JSON.parse(rawBody);
   } catch {
@@ -54,8 +60,7 @@ app.post("/teams", (req, res) => {
 
   console.log("Teams Payload:", payload);
 
-  // Send text response back to Teams
-  return res.json({
+  res.json({
     text: "Node.js received your message ✔"
   });
 });
